@@ -218,65 +218,111 @@ def evaluate_model(model, test_df, label_to_id, tokenizer,
     return metrics
 
 
-def run_experiment(strategy):
+def save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), output_dir / "model_state.pt")
+    tokenizer.save_pretrained(output_dir)
+
+    with open(output_dir / "label_to_id.json", "w", encoding="utf-8") as file:
+        json.dump(label_to_id, file, indent=2)
+
+    with open(output_dir / "metrics.json", "w", encoding="utf-8") as file:
+        json.dump(metrics, file, indent=2)
+
+
+def train_stage_one(stage, train_df, tokenizer):
+    """Train the initial model on the first 10 categories from scratch."""
+    new_classes = [str(category) for category in stage["new_classes"]]
+    label_to_id = {category: index for index,
+                   category in enumerate(new_classes)}
+
+    model = AdaptiveDeskClassifier(num_labels=len(label_to_id))
+    model.to(DEVICE)
+
+    stage_train = stage["train"].copy()
+    stage_test = stage["test"].copy()
+
+    print("\\n" + "=" * 60)
+    print("Stage 1")
+    print(f"New categories: {len(new_classes)}")
+    print(f"Training examples: {len(stage_train)}")
+    print(f"Test examples: {len(stage_test)}")
+
+    train_model(model, make_loader(
+        stage_train, label_to_id, tokenizer, shuffle=True))
+    metrics = evaluate_model(
+        model, stage_test, label_to_id, tokenizer, old_classes=[], new_classes=new_classes
+    )
+    metrics.update({
+        "stage": 1,
+        "strategy": "baseline",
+        "training_examples": int(len(stage_train)),
+        "replay_examples": 0,
+    })
+
+    print(f"Accuracy: {metrics['accuracy']:.4f}")
+    print(f"Macro-F1: {metrics['macro_f1']:.4f}")
+
+    output_dir = CHECKPOINT_ROOT / "stage1_baseline"
+    save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir)
+    print(f"Checkpoint saved to: {output_dir}")
+    return model, label_to_id, metrics
+
+
+def load_checkpoint(checkpoint_dir):
+    with open(checkpoint_dir / "label_to_id.json", "r", encoding="utf-8") as file:
+        label_to_id = json.load(file)
+
+    model = AdaptiveDeskClassifier(num_labels=len(label_to_id))
+    model.load_state_dict(
+        torch.load(checkpoint_dir / "model_state.pt",
+                   map_location="cpu", weights_only=True)
+    )
+    model.to(DEVICE)
+    return model, label_to_id
+
+
+def run_experiment(strategy, stages, train_df, tokenizer):
+    """Run stages 1-8 for baseline, or stages 1-8 using Stage 1 baseline for replay."""
     if strategy not in {"baseline", "replay"}:
         raise ValueError("strategy must be 'baseline' or 'replay'")
 
     set_seed()
-    print(f"Using device: {DEVICE}")
+    print(f"\\nUsing device: {DEVICE}")
     print(f"Strategy: {strategy}")
-
-    # load training and test data
-    train_df, test_df = load_data()
-
-    # create incremental splits
-    stages = create_incremental_splits(
-        train_df,
-        test_df,
-        classes_per_stage=10,
-        seed=SEED,
-    )
-
-    # Continue from the Stage 3 checkpoint already trained for this method.
-    previous_stage = 3
-    previous_dir = CHECKPOINT_ROOT / f"stage{previous_stage}_{strategy}"
-
-    if not previous_dir.exists():
-        raise FileNotFoundError(
-            f"Missing checkpoint directory: {previous_dir}"
-        )
-
-    mapping_path = previous_dir / "label_to_id.json"
-    weights_path = previous_dir / "model_state.pt"
-
-    with open(mapping_path, "r", encoding="utf-8") as file:
-        label_to_id = json.load(file)
-
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    model = AdaptiveDeskClassifier(
-        num_labels=len(label_to_id)
-    )
-    model.load_state_dict(
-        torch.load(weights_path, map_location="cpu", weights_only=True)
-    )
-    model.to(DEVICE)
 
     results = []
 
-    # Starting from stage 4 since Stage 1, 2, 3 already trained.
-    # due to 0 based indexing stage_index 3 represents stage 4
-    for stage_index in range(3, len(stages)):
-        # load the current stage
+    if strategy == "baseline":
+        model, label_to_id, stage1_metrics = train_stage_one(
+            stages[0], train_df, tokenizer
+        )
+        results.append(stage1_metrics)
+        previous_dir = CHECKPOINT_ROOT / "stage1_baseline"
+    else:
+        # Stage 1 is shared: replay starts from the same initial model as baseline.
+        previous_dir = CHECKPOINT_ROOT / "stage1_baseline"
+        if not previous_dir.exists():
+            raise FileNotFoundError(
+                f"Missing Stage 1 baseline checkpoint: {previous_dir}. "
+                "Run the baseline experiment first."
+            )
+        model, label_to_id = load_checkpoint(previous_dir)
+        with open(previous_dir / "metrics.json", "r", encoding="utf-8") as file:
+            stage1_metrics = json.load(file)
+        stage1_metrics["strategy"] = "replay"
+        results.append(stage1_metrics)
+
+    # Train incremental stages 2 through 8.
+    for stage_index in range(1, len(stages)):
         stage = stages[stage_index]
         stage_number = stage_index + 1
 
-        old_classes = list(stages[stage_index - 1]["seen_classes"])
-        new_classes = list(stage["new_classes"])
-        # total categories till now (old + current)
-        seen_classes = list(stage["seen_classes"])
+        old_classes = [str(c) for c in stages[stage_index - 1]["seen_classes"]]
+        new_classes = [str(c) for c in stage["new_classes"]]
+        seen_classes = [str(c) for c in stage["seen_classes"]]
 
-        print("\n" + "=" * 60)
+        print("\\n" + "=" * 60)
         print(f"Stage {stage_number}")
         print(f"Previously seen categories: {len(old_classes)}")
         print(f"New categories: {len(new_classes)}")
@@ -285,58 +331,37 @@ def run_experiment(strategy):
         stage_train = stage["train"].copy()
         stage_test = stage["test"].copy()
 
-        # Add new categories without changing existing label IDs.
+        # Append new label IDs while preserving every previously assigned ID.
         for category in new_classes:
-            category = str(category)
             if category not in label_to_id:
                 label_to_id[category] = len(label_to_id)
 
-        if set(label_to_id) != {str(c) for c in seen_classes}:
+        if set(label_to_id) != set(seen_classes):
             raise ValueError(
-                f"Label mapping does not match Stage {stage_number} classes."
-            )
-
+                f"Label mapping does not match Stage {stage_number} classes.")
         if len(label_to_id) != len(seen_classes):
             raise ValueError("Duplicate or missing label IDs detected.")
 
-        # Expand classifier while preserving existing output weights.
         model.expand_classifier(len(label_to_id))
         model.to(DEVICE)
 
         replay_count = 0
-
         if strategy == "replay":
             memory_df = build_replay_memory(
-                train_df, old_classes, stage_number
-            )
+                train_df, old_classes, stage_number)
             replay_count = len(memory_df)
-
-            # combine the current training data with the replay data
             stage_train = pd.concat(
-                [stage_train, memory_df],
-                ignore_index=True,
-            )
-
+                [stage_train, memory_df], ignore_index=True)
             print(f"Replay examples: {replay_count}")
 
         print(f"Training examples: {len(stage_train)}")
         print(f"Test examples: {len(stage_test)}")
 
-        train_loader = make_loader(
-            stage_train, label_to_id, tokenizer, shuffle=True
-        )
-
-        train_model(model, train_loader)
-
+        train_model(model, make_loader(
+            stage_train, label_to_id, tokenizer, shuffle=True))
         metrics = evaluate_model(
-            model,
-            stage_test,
-            label_to_id,
-            tokenizer,
-            old_classes,
-            new_classes,
+            model, stage_test, label_to_id, tokenizer, old_classes, new_classes
         )
-
         metrics.update({
             "stage": stage_number,
             "strategy": strategy,
@@ -344,45 +369,39 @@ def run_experiment(strategy):
             "replay_examples": int(replay_count),
         })
 
-        print("\nEvaluation")
         print(f"Accuracy: {metrics['accuracy']:.4f}")
         print(f"Macro-F1: {metrics['macro_f1']:.4f}")
-        print(
-            "Old-category accuracy: "
-            f"{metrics['old_category_accuracy']:.4f}"
-        )
-        print(
-            "New-category accuracy: "
-            f"{metrics['new_category_accuracy']:.4f}"
-        )
+        print(f"Old-category accuracy: {metrics['old_category_accuracy']:.4f}")
+        print(f"New-category accuracy: {metrics['new_category_accuracy']:.4f}")
 
         output_dir = CHECKPOINT_ROOT / f"stage{stage_number}_{strategy}"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        torch.save(model.state_dict(), output_dir / "model_state.pt")
-        tokenizer.save_pretrained(output_dir)
-
-        with open(
-            output_dir / "label_to_id.json", "w", encoding="utf-8"
-        ) as file:
-            json.dump(label_to_id, file, indent=2)
-
-        with open(
-            output_dir / "metrics.json", "w", encoding="utf-8"
-        ) as file:
-            json.dump(metrics, file, indent=2)
-
+        save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir)
         results.append(metrics)
-
-        # This model now becomes the starting model for the next stage.
         previous_dir = output_dir
         print(f"Checkpoint saved to: {output_dir}")
 
     results_dir = ROOT / "ml" / "experiments" / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-    results_path = results_dir / f"results_{strategy}_stages4_8.csv"
+    results_path = results_dir / f"results_{strategy}_all_stages.csv"
+    pd.DataFrame(results).sort_values(
+        "stage").to_csv(results_path, index=False)
 
-    pd.DataFrame(results).to_csv(results_path, index=False)
-
-    print(f"\nAll remaining stages completed.")
+    print(f"\\nAll stages completed for {strategy}.")
     print(f"Results saved to: {results_path}")
+
+
+def main():
+    train_df, test_df = load_data()
+    stages = create_incremental_splits(
+        train_df, test_df, classes_per_stage=10, seed=SEED
+    )
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+    # Run baseline first to create the shared Stage 1 checkpoint.
+    run_experiment("baseline", stages, train_df, tokenizer)
+    # Replay then starts from that same Stage 1 checkpoint.
+    run_experiment("replay", stages, train_df, tokenizer)
+
+
+if __name__ == "__main__":
+    main()
