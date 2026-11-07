@@ -17,7 +17,7 @@ from ml.evaluation.metrics import calculate_metrics
 from ml.models.text_classifier import AdaptiveDeskClassifier
 
 
-ROOT = Path.cwd()
+ROOT = Path(__file__).resolve().parents[2]
 TRAIN_PATH = ROOT / "ml/datasets/train.csv"
 TEST_PATH = ROOT / "ml/datasets/test.csv"
 CHECKPOINT_ROOT = ROOT / "ml/models/checkpoints"
