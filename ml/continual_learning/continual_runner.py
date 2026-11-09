@@ -1,4 +1,3 @@
-
 import json
 import random
 from pathlib import Path
@@ -7,9 +6,10 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import accuracy_score
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 from transformers import AutoTokenizer
 
+from ml.continual_learning.replay_memory import ClassBalancedMemory
 from ml.datasets.incremental_splitter import create_incremental_splits
 from ml.datasets.loader import load_dataset
 from ml.datasets.validator import validate_dataset
@@ -24,11 +24,19 @@ CHECKPOINT_ROOT = ROOT / "ml/models/checkpoints"
 
 SEED = 42
 BATCH_SIZE = 8
-EPOCHS = 2
+EPOCHS = 3
 LEARNING_RATE = 2e-5
 MAX_LENGTH = 128
-MEMORY_PER_CLASS = 20
 MODEL_NAME = "distilbert-base-uncased"
+
+MEMORY_SIZE = 1000
+
+# Class-balanced sampling strength for replay training batches.
+#   0.0 -> plain shuffling (no balancing)
+#   1.0 -> fully class-balanced sampling (every seen class equally likely)
+#   0.5 -> compromise: old classes are boosted but new classes still get
+#          plenty of training signal.
+BALANCE_ALPHA = 1
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -80,8 +88,31 @@ def prepare_dataset(dataframe, tokenizer, label_to_id):
     )
 
 
-def make_loader(dataframe, label_to_id, tokenizer, shuffle):
+def make_loader(dataframe, label_to_id, tokenizer, shuffle, balance_alpha=0.0):
+    """Build a DataLoader. With balance_alpha > 0, sample class-balanced.
+
+    Each example gets weight count(class) ** -alpha, so rare classes (the
+    replayed old ones) are drawn more often than frequent ones (the new ones).
+    """
     dataset = prepare_dataset(dataframe, tokenizer, label_to_id)
+
+    if shuffle and balance_alpha > 0:
+        label_ids = dataframe["label"].map(label_to_id).to_numpy()
+        counts = np.bincount(label_ids)
+        weights = counts[label_ids].astype(np.float64) ** (-balance_alpha)
+
+        sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(weights, dtype=torch.double),
+            num_samples=len(dataset),
+            replacement=True,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=BATCH_SIZE,
+            sampler=sampler,  # sampler and shuffle are mutually exclusive
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+        )
 
     return DataLoader(
         dataset,
@@ -90,32 +121,6 @@ def make_loader(dataframe, label_to_id, tokenizer, shuffle):
         num_workers=0,
         pin_memory=torch.cuda.is_available(),
     )
-
-
-def build_replay_memory(train_df, old_classes, stage_number):
-    """Sample up to 20 training examples per previously seen class."""
-
-    rng = np.random.default_rng(SEED + stage_number)
-    memory_parts = []
-
-    for category in old_classes:
-        category_df = train_df[
-            train_df["label"] == category
-        ]
-
-        count = min(MEMORY_PER_CLASS, len(category_df))
-        if count == 0:
-            continue
-
-        random_state = int(rng.integers(0, 2**31 - 1))
-        memory_parts.append(
-            category_df.sample(n=count, random_state=random_state)
-        )
-
-    if not memory_parts:
-        raise ValueError("No examples were selected for replay memory.")
-
-    return pd.concat(memory_parts, ignore_index=True)
 
 
 def train_model(model, loader):
@@ -145,7 +150,7 @@ def train_model(model, loader):
             # calculate the loss
             loss = criterion(logits, labels)
 
-            # backpropogation and calculate the gradient
+            # backpropagation and calculate the gradient
             loss.backward()
             # update the weights
             optimizer.step()
@@ -218,7 +223,8 @@ def evaluate_model(model, test_df, label_to_id, tokenizer,
     return metrics
 
 
-def save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir):
+def save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir,
+                    memory=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), output_dir / "model_state.pt")
     tokenizer.save_pretrained(output_dir)
@@ -228,6 +234,10 @@ def save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir):
 
     with open(output_dir / "metrics.json", "w", encoding="utf-8") as file:
         json.dump(metrics, file, indent=2)
+
+    # Save the exact exemplars stored after this stage, for inspection.
+    if memory is not None:
+        memory.as_dataframe().to_csv(output_dir / "memory.csv", index=False)
 
 
 def train_stage_one(stage, train_df, tokenizer):
@@ -242,7 +252,7 @@ def train_stage_one(stage, train_df, tokenizer):
     stage_train = stage["train"].copy()
     stage_test = stage["test"].copy()
 
-    print("\\n" + "=" * 60)
+    print("\n" + "=" * 60)
     print("Stage 1")
     print(f"New categories: {len(new_classes)}")
     print(f"Training examples: {len(stage_train)}")
@@ -283,15 +293,16 @@ def load_checkpoint(checkpoint_dir):
 
 
 def run_experiment(strategy, stages, train_df, tokenizer):
-    """Run stages 1-8 for baseline, or stages 1-8 using Stage 1 baseline for replay."""
+    """Run stages 1-8 for baseline, or stages 2-8 with class-based replay."""
     if strategy not in {"baseline", "replay"}:
         raise ValueError("strategy must be 'baseline' or 'replay'")
 
     set_seed()
-    print(f"\\nUsing device: {DEVICE}")
+    print(f"\nUsing device: {DEVICE}")
     print(f"Strategy: {strategy}")
 
     results = []
+    memory = None
 
     if strategy == "baseline":
         model, label_to_id, stage1_metrics = train_stage_one(
@@ -313,6 +324,11 @@ def run_experiment(strategy, stages, train_df, tokenizer):
         stage1_metrics["strategy"] = "replay"
         results.append(stage1_metrics)
 
+        # Fill the buffer ONCE from Stage 1 data (the only data available then).
+        memory = ClassBalancedMemory(MEMORY_SIZE, seed=SEED)
+        memory.update(stages[0]["train"], stages[0]["new_classes"])
+        print(f"Replay memory after Stage 1: {memory.summary()}")
+
     # Train incremental stages 2 through 8.
     for stage_index in range(1, len(stages)):
         stage = stages[stage_index]
@@ -322,13 +338,14 @@ def run_experiment(strategy, stages, train_df, tokenizer):
         new_classes = [str(c) for c in stage["new_classes"]]
         seen_classes = [str(c) for c in stage["seen_classes"]]
 
-        print("\\n" + "=" * 60)
+        print("\n" + "=" * 60)
         print(f"Stage {stage_number}")
         print(f"Previously seen categories: {len(old_classes)}")
         print(f"New categories: {len(new_classes)}")
         print(f"Total categories: {len(seen_classes)}")
 
-        stage_train = stage["train"].copy()
+        stage_new_data = stage["train"].copy()  # current-stage data only
+        stage_train = stage_new_data
         stage_test = stage["test"].copy()
 
         # Append new label IDs while preserving every previously assigned ID.
@@ -346,19 +363,22 @@ def run_experiment(strategy, stages, train_df, tokenizer):
         model.to(DEVICE)
 
         replay_count = 0
+        balance_alpha = 0.0
         if strategy == "replay":
-            memory_df = build_replay_memory(
-                train_df, old_classes, stage_number)
+            # Replay ONLY from the persistent buffer, never from train_df.
+            memory_df = memory.as_dataframe()
             replay_count = len(memory_df)
             stage_train = pd.concat(
-                [stage_train, memory_df], ignore_index=True)
-            print(f"Replay examples: {replay_count}")
+                [stage_new_data, memory_df], ignore_index=True)
+            balance_alpha = BALANCE_ALPHA
+            print(f"Replay examples: {replay_count} ({memory.summary()})")
 
         print(f"Training examples: {len(stage_train)}")
         print(f"Test examples: {len(stage_test)}")
 
         train_model(model, make_loader(
-            stage_train, label_to_id, tokenizer, shuffle=True))
+            stage_train, label_to_id, tokenizer, shuffle=True,
+            balance_alpha=balance_alpha))
         metrics = evaluate_model(
             model, stage_test, label_to_id, tokenizer, old_classes, new_classes
         )
@@ -374,8 +394,16 @@ def run_experiment(strategy, stages, train_df, tokenizer):
         print(f"Old-category accuracy: {metrics['old_category_accuracy']:.4f}")
         print(f"New-category accuracy: {metrics['new_category_accuracy']:.4f}")
 
+        # After training, store exemplars of the NEW classes (from this stage's
+        # data only) and shrink every class to the new equal quota.
+        if strategy == "replay":
+            memory.update(stage_new_data, new_classes)
+            print(
+                f"Replay memory after Stage {stage_number}: {memory.summary()}")
+
         output_dir = CHECKPOINT_ROOT / f"stage{stage_number}_{strategy}"
-        save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir)
+        save_checkpoint(model, tokenizer, label_to_id, metrics, output_dir,
+                        memory=memory)
         results.append(metrics)
         previous_dir = output_dir
         print(f"Checkpoint saved to: {output_dir}")
@@ -386,7 +414,7 @@ def run_experiment(strategy, stages, train_df, tokenizer):
     pd.DataFrame(results).sort_values(
         "stage").to_csv(results_path, index=False)
 
-    print(f"\\nAll stages completed for {strategy}.")
+    print(f"\nAll stages completed for {strategy}.")
     print(f"Results saved to: {results_path}")
 
 
