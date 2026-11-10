@@ -227,3 +227,4 @@ ml/models/checkpoints/
 
 # Experiment outputs
 ml/experiments/results/
+ml/experiments/simulation
