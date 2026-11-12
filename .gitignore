@@ -227,4 +227,6 @@ ml/models/checkpoints/
 
 # Experiment outputs
 ml/experiments/results/
-ml/experiments/simulation
+ml/experiments/simulation/
+backend/data/
+ml/models/registry/

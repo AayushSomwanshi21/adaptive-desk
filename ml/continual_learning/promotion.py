@@ -17,7 +17,7 @@ class GateSettings:
     min_new_accuracy: float = 0.7
     # Without enough held-out evidence the gate fails instead of guessing.
     min_old_eval_examples: int = 20
-    min_new_eval_examples: int = 10
+    min_new_eval_examples: int = 20
 
 
 def weak_categories(results, settings):
