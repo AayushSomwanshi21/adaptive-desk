@@ -230,3 +230,6 @@ ml/experiments/results/
 ml/experiments/simulation/
 backend/data/
 ml/models/registry/
+frontend/node_modules/
+dist
+.env.local
