@@ -56,6 +56,7 @@ def main():
         raise SystemExit(f"No demo tickets for '{args.category}'. Use --list.")
 
     category_id = None
+    category_status = None
     with httpx.Client(base_url=args.api, timeout=60) as client:
         for number, text in enumerate(rows["text"], start=1):
             ticket = client.post("/tickets", json={"text": text})
@@ -69,6 +70,7 @@ def main():
             })
             labelled.raise_for_status()
             category_id = labelled.json()["category"]["id"]
+            category_status = labelled.json()["category"]["status"]
 
             if number % 10 == 0:
                 print(f"  sent {number}/{len(rows)}")
@@ -76,12 +78,15 @@ def main():
         print(f"Sent {len(rows)} tickets to category '{args.category}' "
               f"(id {category_id}).")
 
-        if args.approve:
+        if category_status == "proposed" and args.approve:
             client.post(
                 f"/categories/{category_id}/approve").raise_for_status()
             print("Category approved.")
-        else:
+        elif category_status == "proposed":
             print(f"Approve it with: POST /categories/{category_id}/approve")
+        else:
+            print(
+                f"Category is already {category_status}; nothing to approve.")
 
         plan = client.get("/training/plan").json()
         print(f"Training plan: can_start={plan['can_start']}, "
