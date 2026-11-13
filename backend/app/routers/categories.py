@@ -57,7 +57,7 @@ def _find_by_name(db, name):
 def list_categories(status: Optional[str] = None,
                     db: Session = Depends(get_db),
                     classifier=Depends(get_classifier)):
-    query = select(Category).order_by(Category.name)
+    query = select(Category).order_by(Category.created_at.desc())
     if status is not None:
         if status not in CATEGORY_STATUSES:
             raise HTTPException(

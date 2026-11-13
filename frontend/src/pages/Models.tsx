@@ -244,32 +244,38 @@ function VersionRow({ model }: { model: ModelInfo }) {
             </tr>
             {(open || promote.error) && (
                 <tr className="border-b border-slate-100 bg-slate-50">
-                    <td colSpan={8} className="space-y-2 px-3 py-3 text-sm">
-                        <ErrorBox error={promote.error} />
-                        {open && (
-                            <>
-                                <div className="text-slate-600">
-                                    {model.notes || "No notes."}
-                                    {model.parent && ` Parent: ${model.parent}.`}
+                    <td colSpan={8} className="p-0">
+                        <div className={`grid transition-all duration-300 ease-in-out ${open || promote.error ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"}`}>
+                            <div className="overflow-hidden">
+                                <div className="space-y-2 px-3 py-3 text-sm">
+                                    <ErrorBox error={promote.error} />
+                                    {open && (
+                                        <>
+                                            <div className="text-slate-600">
+                                                {model.notes || "No notes."}
+                                                {model.parent && ` Parent: ${model.parent}.`}
+                                            </div>
+                                            {model.new_categories.length > 0 && (
+                                                <div>Added: {model.new_categories.join(", ")}</div>
+                                            )}
+                                            {model.gate && <GateChecks gate={model.gate} />}
+                                            {calibration.threshold !== undefined && (
+                                                <div className="text-slate-600">
+                                                    Auto-label threshold{" "}
+                                                    {calibration.threshold === null
+                                                        ? "off"
+                                                        : pct(calibration.threshold, 0)}
+                                                    {calibration.auto_rate !== undefined &&
+                                                        ` · about ${pct(calibration.auto_rate, 0)} of tickets auto-labeled`}
+                                                    {calibration.temperature !== undefined &&
+                                                        ` · temperature ${calibration.temperature.toFixed(2)}`}
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
                                 </div>
-                                {model.new_categories.length > 0 && (
-                                    <div>Added: {model.new_categories.join(", ")}</div>
-                                )}
-                                {model.gate && <GateChecks gate={model.gate} />}
-                                {calibration.threshold !== undefined && (
-                                    <div className="text-slate-600">
-                                        Auto-label threshold{" "}
-                                        {calibration.threshold === null
-                                            ? "off"
-                                            : pct(calibration.threshold, 0)}
-                                        {calibration.auto_rate !== undefined &&
-                                            ` · about ${pct(calibration.auto_rate, 0)} of tickets auto-labeled`}
-                                        {calibration.temperature !== undefined &&
-                                            ` · temperature ${calibration.temperature.toFixed(2)}`}
-                                    </div>
-                                )}
-                            </>
-                        )}
+                            </div>
+                        </div>
                     </td>
                 </tr>
             )}

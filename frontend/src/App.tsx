@@ -65,7 +65,7 @@ export default function App() {
                     count={stats?.categories.proposed}
                 />
                 <NavItem to="/model" label="Model & training" />
-                <NavItem to="/try" label="Try it" />
+                <NavItem to="/playground" label="Playground" />
             </aside>
 
             <main className="min-w-0 flex-1 p-6">
@@ -75,7 +75,7 @@ export default function App() {
                     <Route path="/tickets" element={<Tickets />} />
                     <Route path="/categories" element={<Categories />} />
                     <Route path="/model" element={<Models />} />
-                    <Route path="/try" element={<Playground />} />
+                    <Route path="/playground" element={<Playground />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
             </main>

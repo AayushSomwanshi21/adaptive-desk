@@ -44,7 +44,7 @@ export default function Playground() {
                     </Button>
                     <Button
                         disabled={!text.trim() || createTicket.isPending}
-                        onClick={() => createTicket.mutate(text)}
+                        onClick={() => { createTicket.mutate(text), setText("") }}
                     >
                         Submit as ticket
                     </Button>
