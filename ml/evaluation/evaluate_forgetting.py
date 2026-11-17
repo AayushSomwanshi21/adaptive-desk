@@ -215,7 +215,7 @@ def evaluate_checkpoint(stage_number, strategy, test_df, tokenizer):
 def calculate_forgetting(category_accuracy_df):
     forgetting_rows = []
 
-    for strategy in ["baseline", "replay"]:
+    for strategy in ["baseline", "replay", "replay_kd"]:
         strategy_df = category_accuracy_df[
             category_accuracy_df["strategy"] == strategy
         ]
@@ -300,7 +300,7 @@ def main():
 
     # Baseline: Stages 1-8
     # Replay: Stages 2-8
-    for strategy in ["baseline", "replay"]:
+    for strategy in ["baseline", "replay", "replay_kd"]:
 
         start_stage = 1 if strategy == "baseline" else 2
 

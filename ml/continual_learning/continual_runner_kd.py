@@ -31,7 +31,7 @@ LEARNING_RATE = 2e-5
 MAX_LENGTH = 128
 MODEL_NAME = "distilbert-base-uncased"
 
-MEMORY_SIZE = 500
+MEMORY_SIZE = 1000
 
 # Class-balanced sampling strength for replay training batches.
 #   0.0 -> plain shuffling (no balancing)
@@ -495,8 +495,8 @@ def main():
     )
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    # Run baseline first to create the shared Stage 1 checkpoint.
-    run_experiment("baseline", stages, train_df, tokenizer)
+    # Reuse the existing Stage 1 baseline checkpoint; uncomment to recreate it.
+    # run_experiment("baseline", stages, train_df, tokenizer)
     # # Replay then starts from that same Stage 1 checkpoint.
     # run_experiment("replay", stages, train_df, tokenizer)
     # # Same replay setup plus knowledge distillation, for a direct comparison.
